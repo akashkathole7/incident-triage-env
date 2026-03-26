@@ -1,0 +1,311 @@
+{
+  "tasks": {
+    "alert_classification": {
+      "task_id": "alert_classification",
+      "name": "Alert Classification",
+      "difficulty": "easy",
+      "description": "Classify the severity of a single-service alert and suggest a remediation action.",
+      "max_steps": 8,
+      "incidents": [
+        {
+          "incident_id": "easy_001",
+          "title": "HTTP 500 Spike on Payments Service",
+          "initial_alert": "ALERT [CRITICAL]: payments-service HTTP 500 error rate spiked to 45% (threshold: 5%). Triggered at 2024-03-15T14:23:00Z. Affected endpoint: POST /api/v2/charge. Current CPU: 92%, Memory: 78%.",
+          "services": ["payments-service"],
+          "gold_severity": "P1",
+          "gold_root_cause": "payments-service",
+          "gold_root_cause_detail": "Memory leak in payments-service causing OOM and HTTP 500 errors under load",
+          "gold_actions": ["restart payments-service", "scale up payments-service replicas"],
+          "gold_escalate": false,
+          "available_logs": {
+            "payments-service": [
+              "[14:22:55] ERROR PaymentProcessor: OutOfMemoryError - Java heap space exceeded",
+              "[14:22:56] ERROR PaymentProcessor: Failed to allocate 256MB for transaction batch #4821",
+              "[14:22:57] WARN  ConnectionPool: 48/50 connections in use, approaching limit",
+              "[14:22:58] ERROR PaymentProcessor: OutOfMemoryError - unable to create new native thread",
+              "[14:23:00] ERROR HealthCheck: Service unhealthy - memory usage at 92% (threshold: 85%)",
+              "[14:23:01] ERROR APIGateway: 23 requests failed with HTTP 500 in last 30 seconds"
+            ]
+          },
+          "available_metrics": {
+            "payments-service": "CPU: 92% | Memory: 78% -> 92% (rising) | HTTP_5xx: 45% | Latency_p99: 12.3s (normally 0.2s) | Active_connections: 48/50 | GC_pause_time: 8.2s (normally 0.05s)"
+          },
+          "available_dependencies": {
+            "payments-service": ["database-primary"]
+          },
+          "available_traces": {
+            "payments-service": "Trace #TX-4821: POST /api/v2/charge -> PaymentProcessor.process() [TIMEOUT after 30s] -> OutOfMemoryError at PaymentProcessor.java:342"
+          }
+        },
+        {
+          "incident_id": "easy_002",
+          "title": "High Latency on User Auth Service",
+          "initial_alert": "ALERT [WARNING]: auth-service response latency p99 increased to 4.2s (threshold: 1.0s). Triggered at 2024-03-15T09:15:00Z. Affected endpoints: POST /auth/login, POST /auth/verify. Current CPU: 35%, Memory: 60%.",
+          "services": ["auth-service"],
+          "gold_severity": "P2",
+          "gold_root_cause": "auth-service",
+          "gold_root_cause_detail": "Expired TLS certificate for downstream LDAP connection causing retry storms",
+          "gold_actions": ["renew TLS certificate for auth-service LDAP connection", "restart auth-service"],
+          "gold_escalate": false,
+          "available_logs": {
+            "auth-service": [
+              "[09:14:30] WARN  LDAPClient: TLS handshake failed - certificate expired (expiry: 2024-03-14T23:59:59Z)",
+              "[09:14:31] WARN  LDAPClient: Retrying connection with backoff (attempt 3/5)",
+              "[09:14:35] WARN  LDAPClient: TLS handshake failed - certificate expired",
+              "[09:14:40] ERROR AuthService: LDAP lookup timed out after 5000ms for user jsmith@corp.com",
+              "[09:15:00] WARN  RateLimiter: Auth requests queuing up - 142 pending requests",
+              "[09:15:01] INFO  Metrics: p99 latency now at 4.2s (was 0.3s 5 minutes ago)"
+            ]
+          },
+          "available_metrics": {
+            "auth-service": "CPU: 35% | Memory: 60% | HTTP_5xx: 2% | Latency_p99: 4.2s (normally 0.3s) | Pending_requests: 142 | LDAP_connection_errors: 89/min"
+          },
+          "available_dependencies": {
+            "auth-service": ["ldap-server"]
+          },
+          "available_traces": {
+            "auth-service": "Trace #AUTH-9921: POST /auth/login -> LDAPClient.authenticate() [5.1s] -> TLS_HANDSHAKE_FAILED -> retry -> TLS_HANDSHAKE_FAILED -> retry -> TIMEOUT"
+          }
+        },
+        {
+          "incident_id": "easy_003",
+          "title": "Disk Space Warning on Logging Service",
+          "initial_alert": "ALERT [WARNING]: logging-service disk usage at 89% (threshold: 80%). Triggered at 2024-03-15T11:00:00Z. Growth rate: 2GB/hour. Estimated time to full: 5.5 hours.",
+          "services": ["logging-service"],
+          "gold_severity": "P3",
+          "gold_root_cause": "logging-service",
+          "gold_root_cause_detail": "Debug logging accidentally left enabled in production causing rapid disk fill",
+          "gold_actions": ["disable debug logging on logging-service", "rotate and compress old log files"],
+          "gold_escalate": false,
+          "available_logs": {
+            "logging-service": [
+              "[10:55:00] INFO  DiskMonitor: /var/log partition usage: 85%",
+              "[10:57:00] INFO  DiskMonitor: /var/log partition usage: 87%",
+              "[10:59:00] WARN  DiskMonitor: /var/log partition usage: 89% - THRESHOLD EXCEEDED",
+              "[11:00:00] INFO  LogConfig: Current log level: DEBUG (all services)",
+              "[11:00:01] INFO  LogIngestion: Ingesting 15,000 log lines/second (normal: 2,000)",
+              "[11:00:02] DEBUG api-gateway: Processing request GET /api/health [req_id=abc123] [user=system] [trace_id=xyz789]"
+            ]
+          },
+          "available_metrics": {
+            "logging-service": "CPU: 45% | Memory: 55% | Disk: 89% (growing 2GB/hr) | Log_lines_per_sec: 15000 (normally 2000) | Log_level: DEBUG | Oldest_log: 2024-03-01"
+          },
+          "available_dependencies": {
+            "logging-service": ["elasticsearch-cluster"]
+          },
+          "available_traces": {
+            "logging-service": "No active traces - service is functioning normally aside from disk pressure"
+          }
+        }
+      ]
+    },
+    "root_cause_analysis": {
+      "task_id": "root_cause_analysis",
+      "name": "Root Cause Analysis",
+      "difficulty": "medium",
+      "description": "Multiple services are alerting. Investigate to find the actual root cause service vs downstream symptoms.",
+      "max_steps": 12,
+      "incidents": [
+        {
+          "incident_id": "med_001",
+          "title": "Multiple Service Degradation - API and Database",
+          "initial_alert": "ALERT [CRITICAL]: Multiple services degraded.\n- api-gateway: HTTP 503 rate at 30%, latency p99: 8.5s\n- user-service: HTTP 500 rate at 25%\n- database-primary: Connection pool exhausted\nTriggered at 2024-03-15T16:45:00Z.",
+          "services": ["api-gateway", "user-service", "database-primary"],
+          "gold_severity": "P1",
+          "gold_root_cause": "database-primary",
+          "gold_root_cause_detail": "Long-running analytical query holding table locks on database-primary, causing connection pool exhaustion and cascading failures to api-gateway and user-service",
+          "gold_actions": ["kill long-running query on database-primary", "increase connection pool size", "add query timeout limits"],
+          "gold_escalate": false,
+          "available_logs": {
+            "api-gateway": [
+              "[16:44:30] WARN  Upstream: user-service responding slowly (avg 6.2s)",
+              "[16:44:45] ERROR ProxyHandler: 503 Service Unavailable from user-service",
+              "[16:44:50] ERROR CircuitBreaker: user-service circuit OPEN after 15 consecutive failures",
+              "[16:45:00] ERROR ProxyHandler: Returning 503 to clients - upstream services unavailable"
+            ],
+            "user-service": [
+              "[16:44:00] WARN  DBPool: Waiting for available connection (pool: 50/50 in use)",
+              "[16:44:15] ERROR DBPool: Connection acquisition timeout after 30s",
+              "[16:44:20] ERROR UserRepository: Failed to fetch user profile - no DB connection available",
+              "[16:44:30] ERROR UserService: HTTP 500 - database connection unavailable",
+              "[16:44:45] WARN  DBPool: All connections blocked - check for lock contention"
+            ],
+            "database-primary": [
+              "[16:30:00] INFO  QueryLog: Starting query: SELECT * FROM users u JOIN orders o ON u.id = o.user_id JOIN products p ON o.product_id = p.id WHERE o.created_at > '2023-01-01' -- analytics-report-q4",
+              "[16:35:00] WARN  LockManager: Table-level lock held by query #8821 for 5 minutes",
+              "[16:40:00] WARN  ConnectionPool: 48/50 connections in use, 42 waiting for lock release",
+              "[16:44:00] ERROR ConnectionPool: Pool exhausted - 50/50 connections, 23 queries waiting",
+              "[16:45:00] WARN  LockManager: Query #8821 still holding lock after 15 minutes - BLOCKING 42 queries"
+            ]
+          },
+          "available_metrics": {
+            "api-gateway": "CPU: 25% | Memory: 40% | HTTP_503: 30% | Latency_p99: 8.5s | Upstream_errors: 45/min",
+            "user-service": "CPU: 15% | Memory: 35% | HTTP_500: 25% | DB_connection_wait: 30s | DB_pool_used: 50/50",
+            "database-primary": "CPU: 85% | Memory: 70% | Active_connections: 50/50 | Waiting_queries: 23 | Lock_wait_time_avg: 12.5s | Longest_running_query: 15min"
+          },
+          "available_dependencies": {
+            "api-gateway": ["user-service", "payment-service", "product-service"],
+            "user-service": ["database-primary", "cache-redis"],
+            "database-primary": []
+          },
+          "available_traces": {
+            "api-gateway": "Trace #GW-1122: GET /api/users/123 -> user-service.GetUser() [TIMEOUT 30s] -> 503 returned to client",
+            "user-service": "Trace #US-3344: GetUser(123) -> DBPool.acquire() [BLOCKED 30s] -> ConnectionTimeout -> 500",
+            "database-primary": "Query #8821: Full table scan on users JOIN orders JOIN products (15 min, still running). 42 blocked queries waiting for table lock release."
+          }
+        },
+        {
+          "incident_id": "med_002",
+          "title": "Checkout Flow Failures",
+          "initial_alert": "ALERT [CRITICAL]: Checkout success rate dropped to 60% (threshold: 95%).\n- cart-service: Intermittent 500 errors\n- inventory-service: Slow responses (p99: 5.2s)\n- cache-redis: High memory usage at 95%\nTriggered at 2024-03-15T20:30:00Z.",
+          "services": ["cart-service", "inventory-service", "cache-redis"],
+          "gold_severity": "P1",
+          "gold_root_cause": "cache-redis",
+          "gold_root_cause_detail": "Redis maxmemory reached with no eviction policy, causing cache writes to fail silently and forcing all requests to hit inventory-service database directly, overwhelming it",
+          "gold_actions": ["configure Redis eviction policy (allkeys-lru)", "increase Redis maxmemory", "restart cache-redis with new config"],
+          "gold_escalate": false,
+          "available_logs": {
+            "cart-service": [
+              "[20:28:00] WARN  CartManager: Inventory check slow for SKU-4421 (3.2s)",
+              "[20:29:00] ERROR CartManager: Failed to reserve inventory for SKU-4421 - timeout",
+              "[20:29:30] ERROR CheckoutHandler: Checkout failed - inventory reservation timeout",
+              "[20:30:00] ERROR CartManager: 40% of inventory checks timing out"
+            ],
+            "inventory-service": [
+              "[20:25:00] WARN  CacheClient: Redis SET failed - OOM command not allowed when used memory > maxmemory",
+              "[20:25:01] INFO  InventoryRepo: Cache miss for SKU-4421 - falling back to database",
+              "[20:27:00] WARN  InventoryRepo: Cache miss rate at 85% (normally 10%)",
+              "[20:28:00] WARN  DBPool: Connection pool at 90% capacity due to increased direct DB queries",
+              "[20:30:00] ERROR InventoryRepo: Database query timeout - too many concurrent queries"
+            ],
+            "cache-redis": [
+              "[20:20:00] WARN  Redis: Used memory 3.8GB/4.0GB (95%)",
+              "[20:22:00] ERROR Redis: OOM command not allowed when used memory > 'maxmemory'",
+              "[20:22:01] INFO  Redis: maxmemory-policy: noeviction",
+              "[20:25:00] ERROR Redis: Rejecting write commands - memory limit reached",
+              "[20:30:00] ERROR Redis: 342 write commands rejected in last 10 minutes"
+            ]
+          },
+          "available_metrics": {
+            "cart-service": "CPU: 30% | Memory: 45% | Checkout_success: 60% | Inventory_timeout: 40% | Latency_p99: 6.1s",
+            "inventory-service": "CPU: 75% | Memory: 60% | Cache_miss_rate: 85% | DB_query_time_avg: 3.2s | HTTP_500: 15%",
+            "cache-redis": "CPU: 10% | Memory: 95% (3.8/4.0 GB) | Eviction_policy: noeviction | Write_errors: 342/10min | Connected_clients: 45"
+          },
+          "available_dependencies": {
+            "cart-service": ["inventory-service", "user-service"],
+            "inventory-service": ["cache-redis", "database-inventory"],
+            "cache-redis": []
+          },
+          "available_traces": {
+            "cart-service": "Trace #CART-5566: POST /checkout -> InventoryService.reserve() [TIMEOUT 5s] -> CheckoutFailed",
+            "inventory-service": "Trace #INV-7788: reserve(SKU-4421) -> CacheClient.get() [MISS] -> DB.query() [3.2s] -> CacheClient.set() [FAILED: OOM]",
+            "cache-redis": "No traces available - Redis metrics dashboard shows memory at ceiling with noeviction policy active"
+          }
+        }
+      ]
+    },
+    "cascade_incident": {
+      "task_id": "cascade_incident",
+      "name": "Cascade Incident",
+      "difficulty": "hard",
+      "description": "Complex multi-service outage with red herring alerts, cascading failures, and an escalation decision. You must diagnose the true root cause, filter out misleading signals, and decide whether to escalate.",
+      "max_steps": 18,
+      "incidents": [
+        {
+          "incident_id": "hard_001",
+          "title": "Critical Production Outage - Multiple Systems Affected",
+          "initial_alert": "ALERT [CRITICAL]: MAJOR INCIDENT - Multiple systems reporting failures simultaneously.\n- api-gateway: 60% error rate, p99 latency 15s\n- payment-service: Transaction failures at 80%\n- user-service: Intermittent 500 errors (20%)\n- notification-service: Queue backlog growing (50K messages)\n- search-service: Elevated latency (p99: 3.2s)\nTriggered at 2024-03-15T23:15:00Z. On-call SRE team paged.",
+          "services": ["api-gateway", "payment-service", "user-service", "notification-service", "search-service", "database-primary", "cache-redis", "message-queue"],
+          "gold_severity": "P1",
+          "gold_root_cause": "database-primary",
+          "gold_root_cause_detail": "Failed database primary-to-replica replication caused the replica to serve stale data. Automated failover then promoted the stale replica to primary when the original primary had a brief network blip, resulting in data inconsistencies that cascaded through payment-service (stale user balances), user-service (stale sessions), and caused notification-service queue backlog. The search-service latency is a RED HERRING caused by an unrelated index rebuild.",
+          "gold_actions": ["stop writes to new primary database", "verify data consistency between old and new primary", "manually failover back to original primary if data is intact", "drain and replay notification queue after DB is stable", "notify payment team of potential inconsistent transactions"],
+          "gold_escalate": true,
+          "gold_escalation_reason": "Data consistency issue affecting financial transactions requires senior DB engineer and payment team lead",
+          "available_logs": {
+            "api-gateway": [
+              "[23:13:00] WARN  LoadBalancer: payment-service health check failing (3/5 instances)",
+              "[23:14:00] ERROR ProxyHandler: Upstream errors increasing - payment-service: 60%, user-service: 15%",
+              "[23:14:30] ERROR CircuitBreaker: payment-service circuit OPEN",
+              "[23:15:00] ERROR ProxyHandler: Returning 503 to 60% of requests",
+              "[23:15:30] WARN  RateLimiter: Activating emergency rate limiting - 500 req/s cap"
+            ],
+            "payment-service": [
+              "[23:12:00] ERROR TransactionManager: Balance mismatch for user_id=88421 - DB shows $0.00 but cache shows $142.50",
+              "[23:12:30] ERROR TransactionManager: Duplicate transaction detected - tx_id=TX-99281 exists with different amount",
+              "[23:13:00] ERROR PaymentValidator: Data integrity check FAILED - 15 transactions with inconsistent state",
+              "[23:14:00] ERROR TransactionManager: Refusing to process payments - data consistency violation detected",
+              "[23:15:00] CRITICAL PaymentService: PAYMENT PROCESSING HALTED - integrity checks failing at 80% rate"
+            ],
+            "user-service": [
+              "[23:13:00] WARN  SessionManager: Session data mismatch - cached session differs from DB for user_id=88421",
+              "[23:13:30] ERROR UserRepository: Stale read detected - record timestamp older than expected by 45 seconds",
+              "[23:14:00] WARN  SessionManager: 20% of session lookups returning stale data",
+              "[23:14:30] ERROR UserService: Returning 500 for requests with detected stale data"
+            ],
+            "notification-service": [
+              "[23:10:00] INFO  QueueConsumer: Processing rate normal - 500 msg/sec",
+              "[23:13:00] WARN  QueueConsumer: Processing rate dropped to 50 msg/sec",
+              "[23:14:00] ERROR NotificationHandler: Failed to resolve user data for notification batch #4421",
+              "[23:14:30] WARN  QueueMonitor: Queue depth growing - 25K messages (normally <1K)",
+              "[23:15:00] WARN  QueueMonitor: Queue depth at 50K - consumer falling behind due to user-service errors"
+            ],
+            "search-service": [
+              "[23:00:00] INFO  IndexManager: Starting scheduled index rebuild for products catalog",
+              "[23:10:00] INFO  IndexManager: Index rebuild 60% complete - temporarily elevated latency expected",
+              "[23:15:00] INFO  IndexManager: Index rebuild 80% complete - estimated 10 min remaining",
+              "[23:15:01] WARN  SearchHandler: p99 latency at 3.2s during index rebuild (normal during maintenance)"
+            ],
+            "database-primary": [
+              "[23:08:00] WARN  ReplicationManager: Replication lag increasing - replica-1 behind by 30 seconds",
+              "[23:09:00] ERROR ReplicationManager: Replication to replica-1 STOPPED - network timeout",
+              "[23:10:00] WARN  ReplicationManager: replica-1 serving stale data (45s behind)",
+              "[23:11:00] ERROR NetworkMonitor: Brief network partition detected between primary and replica-1 (duration: 8s)",
+              "[23:11:05] INFO  FailoverManager: Network partition detected - initiating automated failover",
+              "[23:11:10] INFO  FailoverManager: Promoting replica-1 to primary (NOTE: replica was 45s behind at time of promotion)",
+              "[23:11:15] WARN  FailoverManager: NEW PRIMARY (formerly replica-1) may have stale data from replication lag",
+              "[23:12:00] ERROR ConsistencyChecker: Data divergence detected between old primary and new primary - 847 records differ"
+            ],
+            "cache-redis": [
+              "[23:12:00] INFO  CacheManager: Cache entries being invalidated by DB change stream",
+              "[23:12:30] WARN  CacheManager: Change stream from new primary contains conflicting updates",
+              "[23:13:00] WARN  CacheManager: 342 cache entries have inconsistent values vs new primary"
+            ],
+            "message-queue": [
+              "[23:14:00] INFO  QueueBroker: Queue depth for notifications: 25K (rising)",
+              "[23:15:00] INFO  QueueBroker: No broker-level issues - producers and consumers connected normally"
+            ]
+          },
+          "available_metrics": {
+            "api-gateway": "CPU: 40% | Memory: 50% | HTTP_5xx: 60% | Latency_p99: 15s | Upstream_errors: payment=80%, user=20%",
+            "payment-service": "CPU: 20% | Memory: 45% | Transaction_failure: 80% | Data_integrity_errors: 847 | Processing: HALTED",
+            "user-service": "CPU: 25% | Memory: 40% | HTTP_500: 20% | Stale_reads: 20% | Session_mismatches: 15%",
+            "notification-service": "CPU: 15% | Memory: 35% | Queue_depth: 50K | Processing_rate: 50/s (normally 500/s) | Consumer_errors: 30%",
+            "search-service": "CPU: 70% | Memory: 55% | Latency_p99: 3.2s (normally 0.5s) | Index_rebuild: IN_PROGRESS (80%)",
+            "database-primary": "CPU: 55% | Memory: 65% | Replication_status: FAILED_OVER | Records_diverged: 847 | Old_primary: DEMOTED | New_primary: formerly_replica-1",
+            "cache-redis": "CPU: 15% | Memory: 60% | Inconsistent_entries: 342 | Eviction_rate: normal",
+            "message-queue": "CPU: 20% | Memory: 30% | Queue_depth: 50K | Broker_status: HEALTHY"
+          },
+          "available_dependencies": {
+            "api-gateway": ["payment-service", "user-service", "search-service", "notification-service"],
+            "payment-service": ["database-primary", "cache-redis"],
+            "user-service": ["database-primary", "cache-redis"],
+            "notification-service": ["message-queue", "user-service"],
+            "search-service": ["elasticsearch-cluster"],
+            "database-primary": ["database-replica-1"],
+            "cache-redis": ["database-primary"],
+            "message-queue": []
+          },
+          "available_traces": {
+            "api-gateway": "Trace #GW-9900: POST /api/payment -> payment-service.charge() [FAILED: DATA_INTEGRITY_ERROR] -> 503",
+            "payment-service": "Trace #PAY-1100: charge(user=88421, amount=$50) -> DB.getUserBalance() [returns $0.00, expected $142.50] -> INTEGRITY_CHECK_FAILED",
+            "user-service": "Trace #US-2200: getSession(user=88421) -> DB.read() [stale: 45s old] -> mismatch with cache -> 500",
+            "notification-service": "Trace #NOT-3300: sendNotification(user=88421) -> UserService.getUser() [500 ERROR] -> RETRY_QUEUED",
+            "search-service": "Trace #SRCH-4400: search(query='laptop') -> ES.query() [3.2s, index rebuilding] -> 200 OK (results returned, just slow)",
+            "database-primary": "Failover event: primary (10.0.1.5) -> replica-1 (10.0.1.6) at 23:11:10. Replication lag at failover: 45s. Records diverged: 847."
+          }
+        }
+      ]
+    }
+  }
+}
