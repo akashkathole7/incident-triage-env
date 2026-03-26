@@ -2,22 +2,19 @@
 """
 Baseline Inference Script for Incident Triage Environment.
 
-This script runs a baseline LLM agent (via OpenAI API) against all 3 tasks
-and reports scores. It demonstrates how an LLM agent interacts with the
-environment through MCP tools.
+Runs a baseline LLM agent (via OpenAI API) against all 3 tasks
+and reports grader scores. Uses the custom /reset_env and /step_env
+endpoints which return full observation metadata.
 
 Usage:
-    OPENAI_API_KEY=sk-... python baseline.py
+    set OPENAI_API_KEY=sk-...
+    python baseline.py
 
-    # Or with a custom base URL for the environment
-    OPENAI_API_KEY=sk-... python baseline.py --env-url http://localhost:8000
-
-Requirements:
-    pip install openai httpx
+    # Or with custom environment URL
+    python baseline.py --env-url http://localhost:8000
 """
 
 import argparse
-import asyncio
 import json
 import os
 import sys
@@ -36,10 +33,9 @@ except ImportError:
     sys.exit(1)
 
 
-# System prompt for the baseline SRE agent
 SYSTEM_PROMPT = """You are an experienced Site Reliability Engineer (SRE) responding to a production incident.
 
-You have access to the following investigation tools:
+You have access to these investigation tools:
 - classify_severity(severity): Classify the incident as P1, P2, P3, or P4
 - investigate_logs(service): View application logs for a service
 - investigate_metrics(service): View performance metrics for a service
@@ -47,275 +43,179 @@ You have access to the following investigation tools:
 - investigate_traces(service): View distributed traces for a service
 - recommend_action(action_description): Recommend a remediation action
 - escalate(team, reason): Escalate to another team (ends episode)
-- resolve_incident(summary): Resolve the incident (ends episode)
+- resolve_incident(summary): Resolve with findings summary (ends episode)
 
-Your approach should be:
-1. Read the initial alert carefully
-2. Investigate the most likely affected services (logs, metrics, traces)
-3. Identify the root cause by following the dependency chain
-4. Classify the severity accurately
+Approach:
+1. Read the alert carefully and note which services are affected
+2. Investigate the most critical services first (logs → metrics → traces)
+3. Follow the dependency chain to find the ROOT CAUSE (not just symptoms)
+4. Classify severity accurately
 5. Recommend specific remediation actions
-6. Either resolve the incident with a summary or escalate if needed
+6. Resolve the incident with a summary mentioning the root cause service, OR escalate if the situation requires it
 
-Be systematic and thorough. Use the investigation tools before jumping to conclusions.
-Always end by either resolving or escalating the incident.
-"""
+IMPORTANT: Be systematic. Don't guess — investigate first. Always end by resolving or escalating."""
 
 
-def call_tool_via_http(env_url: str, tool_name: str, arguments: dict, session_id: str = "baseline") -> dict:
-    """Call an MCP tool on the environment server via HTTP."""
-    # Use the step endpoint with CallToolAction
-    response = httpx.post(
-        f"{env_url}/step",
-        json={
-            "action": {
-                "type": "call_tool",
-                "tool_name": tool_name,
-                "arguments": arguments,
-            }
-        },
-        params={"session_id": session_id},
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()
+# OpenAI tool definitions that map to our environment's MCP tools
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "classify_severity",
+        "description": "Classify incident severity level",
+        "parameters": {"type": "object", "properties": {"severity": {"type": "string", "enum": ["P1", "P2", "P3", "P4"]}}, "required": ["severity"]},
+    }},
+    {"type": "function", "function": {
+        "name": "investigate_logs",
+        "description": "View application logs for a service",
+        "parameters": {"type": "object", "properties": {"service": {"type": "string"}}, "required": ["service"]},
+    }},
+    {"type": "function", "function": {
+        "name": "investigate_metrics",
+        "description": "View performance metrics for a service",
+        "parameters": {"type": "object", "properties": {"service": {"type": "string"}}, "required": ["service"]},
+    }},
+    {"type": "function", "function": {
+        "name": "investigate_dependencies",
+        "description": "View dependency graph for a service",
+        "parameters": {"type": "object", "properties": {"service": {"type": "string"}}, "required": ["service"]},
+    }},
+    {"type": "function", "function": {
+        "name": "investigate_traces",
+        "description": "View distributed traces for a service",
+        "parameters": {"type": "object", "properties": {"service": {"type": "string"}}, "required": ["service"]},
+    }},
+    {"type": "function", "function": {
+        "name": "recommend_action",
+        "description": "Recommend a remediation action",
+        "parameters": {"type": "object", "properties": {"action_description": {"type": "string"}}, "required": ["action_description"]},
+    }},
+    {"type": "function", "function": {
+        "name": "escalate",
+        "description": "Escalate to another team (ends the episode)",
+        "parameters": {"type": "object", "properties": {"team": {"type": "string"}, "reason": {"type": "string"}}, "required": ["team", "reason"]},
+    }},
+    {"type": "function", "function": {
+        "name": "resolve_incident",
+        "description": "Resolve the incident with a summary of findings (ends the episode)",
+        "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]},
+    }},
+]
 
 
-def reset_env(env_url: str, task_id: str, session_id: str = "baseline") -> dict:
-    """Reset the environment for a new episode."""
-    response = httpx.post(
-        f"{env_url}/reset",
-        json={"task_id": task_id},
-        params={"session_id": session_id},
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()
+def run_task(client: OpenAI, env_url: str, task_id: str, model: str = "gpt-4o-mini") -> dict:
+    """Run the baseline agent for a single task."""
 
-
-def run_baseline_for_task(
-    client: OpenAI,
-    env_url: str,
-    task_id: str,
-    model: str = "gpt-4o-mini",
-    session_id: str = "baseline",
-) -> dict:
-    """
-    Run the baseline agent for a single task.
-
-    Args:
-        client: OpenAI client
-        env_url: Environment server URL
-        task_id: Task to run (alert_classification, root_cause_analysis, cascade_incident)
-        model: OpenAI model to use
-        session_id: Session ID for the environment
-
-    Returns:
-        Result dictionary with score and details
-    """
     print(f"\n{'='*60}")
-    print(f"Running baseline for task: {task_id}")
+    print(f"  Task: {task_id}")
     print(f"{'='*60}")
 
-    # Reset environment
-    try:
-        reset_result = reset_env(env_url, task_id, session_id)
-    except Exception as e:
-        print(f"  ERROR resetting environment: {e}")
-        return {"task_id": task_id, "score": 0.0, "error": str(e)}
+    # 1. Reset environment via custom endpoint
+    r = httpx.post(f"{env_url}/reset_env", json={"task_id": task_id}, timeout=30)
+    if r.status_code != 200:
+        print(f"  ERROR: Reset failed ({r.status_code})")
+        return {"task_id": task_id, "score": 0.0, "error": f"Reset failed: {r.status_code}"}
 
-    metadata = reset_result.get("metadata", reset_result.get("observation", {}).get("metadata", {}))
-    initial_alert = metadata.get("initial_alert", "No alert data")
-    affected_services = metadata.get("affected_services", "unknown")
+    reset_data = r.json()
+    metadata = reset_data.get("metadata", {})
+    initial_alert = metadata.get("initial_alert", "No alert received")
+    affected = metadata.get("affected_services", "unknown")
     max_steps = metadata.get("max_steps", 10)
+    task_desc = metadata.get("task_description", "Investigate and resolve")
 
     print(f"  Incident: {metadata.get('incident_title', 'Unknown')}")
-    print(f"  Difficulty: {metadata.get('task_difficulty', 'unknown')}")
+    print(f"  Difficulty: {metadata.get('task_difficulty', '?')}")
     print(f"  Max steps: {max_steps}")
 
-    # Build conversation for the LLM
+    # 2. Build LLM conversation
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": (
-            f"NEW INCIDENT ALERT:\n\n{initial_alert}\n\n"
-            f"Affected services: {affected_services}\n"
-            f"Task: {metadata.get('task_description', 'Investigate and resolve')}\n"
-            f"You have {max_steps} steps. Use tools to investigate and resolve.\n\n"
-            f"Respond with a JSON object for each action:\n"
-            f'{{"tool": "<tool_name>", "args": {{...}}}}\n\n'
-            f"Start your investigation."
+            f"INCOMING INCIDENT ALERT\n"
+            f"{'='*40}\n\n"
+            f"{initial_alert}\n\n"
+            f"Affected services: {affected}\n"
+            f"Task objective: {task_desc}\n"
+            f"Steps available: {max_steps}\n\n"
+            f"Begin your investigation now."
         )},
     ]
 
-    # Tool definitions for the LLM
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "classify_severity",
-                "description": "Classify incident severity level",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"severity": {"type": "string", "enum": ["P1", "P2", "P3", "P4"]}},
-                    "required": ["severity"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "investigate_logs",
-                "description": "View application logs for a service",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"service": {"type": "string"}},
-                    "required": ["service"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "investigate_metrics",
-                "description": "View performance metrics for a service",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"service": {"type": "string"}},
-                    "required": ["service"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "investigate_dependencies",
-                "description": "View dependency graph for a service",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"service": {"type": "string"}},
-                    "required": ["service"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "investigate_traces",
-                "description": "View distributed traces for a service",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"service": {"type": "string"}},
-                    "required": ["service"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "recommend_action",
-                "description": "Recommend a remediation action",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"action_description": {"type": "string"}},
-                    "required": ["action_description"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "escalate",
-                "description": "Escalate to another team (ends episode)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "team": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["team", "reason"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "resolve_incident",
-                "description": "Resolve the incident with a summary (ends episode)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"summary": {"type": "string"}},
-                    "required": ["summary"],
-                },
-            },
-        },
-    ]
-
+    # 3. Agent loop
     done = False
     step_count = 0
 
     while not done and step_count < max_steps:
         try:
-            # Get LLM response
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=tools,
+                tools=TOOLS,
                 tool_choice="auto",
-                temperature=0.1,  # Low temperature for deterministic baseline
+                temperature=0.1,
             )
+            msg = response.choices[0].message
 
-            message = response.choices[0].message
-
-            if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_name = tc.function.name
                     try:
-                        tool_args = json.loads(tool_call.function.arguments)
+                        tool_args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         tool_args = {}
 
                     step_count += 1
-                    print(f"  Step {step_count}: {tool_name}({tool_args})")
+                    print(f"  Step {step_count}: {tool_name}({json.dumps(tool_args)[:80]})")
 
-                    # Call the tool on the environment
-                    try:
-                        result = call_tool_via_http(env_url, tool_name, tool_args, session_id)
-                        tool_result = json.dumps(result.get("metadata", result), indent=2)
-                        done = result.get("done", False)
-                    except Exception as e:
-                        tool_result = f"Error calling tool: {e}"
+                    # Call through custom endpoint
+                    step_r = httpx.post(f"{env_url}/step_env", json={
+                        "task_id": task_id,
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                    }, timeout=30)
 
-                    # Add tool call and result to messages
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [
-                        {"id": tool_call.id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
-                    ]})
-                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_result})
+                    if step_r.status_code == 200:
+                        step_data = step_r.json()
+                        tool_output = step_data.get("tool_output", "No output")
+                        done = step_data.get("done", False)
+                        reward = step_data.get("reward", 0.0)
+                        print(f"         → reward={reward}, done={done}")
+                    else:
+                        tool_output = f"Error: HTTP {step_r.status_code}"
+
+                    # Append to conversation
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": json.dumps(tool_args)}
+                        }]
+                    })
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_output})
 
                     if done:
                         break
             else:
-                # No tool call — LLM responded with text. Ask it to use a tool.
-                messages.append({"role": "assistant", "content": message.content})
-                messages.append({"role": "user", "content": "Please use one of the available tools to continue investigation or resolve the incident."})
+                # LLM gave text instead of tool call — nudge it
+                messages.append({"role": "assistant", "content": msg.content or ""})
+                messages.append({"role": "user", "content": "Please use a tool to continue your investigation or resolve/escalate the incident."})
                 step_count += 1
 
         except Exception as e:
             print(f"  ERROR at step {step_count}: {e}")
             break
 
-    # Get grader result
-    try:
-        grader_response = httpx.post(
-            f"{env_url}/grader",
-            params={"session_id": session_id},
-            timeout=30.0,
-        )
-        grader_result = grader_response.json()
-    except Exception:
-        grader_result = {"score": 0.0}
+    # 4. Get grader score
+    grader_r = httpx.post(f"{env_url}/grader", json={"task_id": task_id}, timeout=30)
+    grader_result = grader_r.json() if grader_r.status_code == 200 else {"score": 0.0}
 
     score = grader_result.get("score", 0.0)
-    print(f"\n  Result: score={score}, steps={step_count}")
+    breakdown = grader_result.get("breakdown", {})
+
+    print(f"\n  SCORE: {score}")
+    if breakdown:
+        for k, v in breakdown.items():
+            print(f"    {k}: {v}")
 
     return {
         "task_id": task_id,
@@ -332,11 +232,9 @@ def main():
     parser.add_argument("--task", default=None, help="Run specific task only")
     args = parser.parse_args()
 
-    # Check for API key
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("ERROR: OPENAI_API_KEY environment variable not set")
-        print("Usage: OPENAI_API_KEY=sk-... python baseline.py")
         sys.exit(1)
 
     client = OpenAI(api_key=api_key)
@@ -347,12 +245,7 @@ def main():
 
     results = []
     for task_id in tasks:
-        result = run_baseline_for_task(
-            client=client,
-            env_url=args.env_url,
-            task_id=task_id,
-            model=args.model,
-        )
+        result = run_task(client, args.env_url, task_id, args.model)
         results.append(result)
 
     # Summary
@@ -363,20 +256,18 @@ def main():
     print(f"{'-'*45}")
     for r in results:
         print(f"{r['task_id']:<25} {r['score']:<10.4f} {r['steps']:<10}")
-
-    avg_score = sum(r["score"] for r in results) / len(results) if results else 0
+    avg = sum(r["score"] for r in results) / len(results) if results else 0
     print(f"{'-'*45}")
-    print(f"{'Average':<25} {avg_score:<10.4f}")
+    print(f"{'Average':<25} {avg:<10.4f}")
     print(f"\nModel: {args.model}")
-    print(f"Environment: {args.env_url}")
 
-    # Save results
-    results_dir = os.path.join(os.path.dirname(__file__), "outputs", "evals")
-    os.makedirs(results_dir, exist_ok=True)
-    results_path = os.path.join(results_dir, "baseline_results.json")
-    with open(results_path, "w") as f:
-        json.dump({"results": results, "model": args.model, "average_score": avg_score}, f, indent=2)
-    print(f"\nResults saved to {results_path}")
+    # Save
+    out_dir = os.path.join(os.path.dirname(__file__), "outputs", "evals")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "baseline_results.json")
+    with open(out_path, "w") as f:
+        json.dump({"results": results, "model": args.model, "average_score": avg}, f, indent=2)
+    print(f"\nSaved to {out_path}")
 
 
 if __name__ == "__main__":

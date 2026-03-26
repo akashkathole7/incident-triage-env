@@ -17,18 +17,12 @@ Tools:
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
-# Support both in-repo and standalone imports
-try:
-    from openenv.core.env_server.mcp_environment import MCPEnvironment
-    from openenv.core.env_server.types import Action, Observation, State
-except ImportError:
-    from openenv.core.env_server.mcp_environment import MCPEnvironment
-    from openenv.core.env_server.types import Action, Observation, State
+from openenv.core.env_server.mcp_environment import MCPEnvironment
+from openenv.core.env_server.types import Action, Observation, State
 
 from fastmcp import FastMCP
 
