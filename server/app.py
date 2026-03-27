@@ -40,6 +40,16 @@ app = create_app(
 
 # ---- Custom Endpoints ----
 
+@app.get("/")
+async def root():
+    """Root endpoint for HF Spaces healthcheck."""
+    return {
+        "status": "ok",
+        "message": "Incident Triage Environment API is running.",
+        "description": "An OpenEnv environment for AI agent incident response.",
+        "endpoints": ["/tasks", "/reset_env", "/step_env", "/grader", "/baseline"]
+    }
+
 @app.get("/tasks")
 async def get_tasks():
     """Return list of available tasks and action schema."""
